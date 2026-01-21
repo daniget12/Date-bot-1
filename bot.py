@@ -9,13 +9,13 @@ from telegram.ext import (
     MessageHandler, ConversationHandler, filters, CallbackQueryHandler
 )
 from dotenv import load_dotenv
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
+from aiohttp import web
+import signal
 
 # Load environment variables
 load_dotenv()
 
-# Define conversation states (ALL STATES INTACT)
+# Define conversation states
 (NAME, GENDER, CAMPUS, PHOTO, BIO, HOBBIES, PREFERENCE, REVIEW, 
  EDIT_CHOICE, EDIT_NAME, EDIT_GENDER, EDIT_CAMPUS, 
  EDIT_PHOTO, EDIT_BIO, EDIT_HOBBIES, REPORT_REASON) = range(16)
@@ -39,34 +39,26 @@ if not DATABASE_URL:
 print(f"✅ Starting bot with token: {BOT_TOKEN[:10]}...")
 print(f"✅ Database URL: {DATABASE_URL[:30]}...")
 
-# Simple health check server for Railway
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'Bot is healthy')
-        else:
-            self.send_response(404)
-            self.end_headers()
+# Async HTTP server for health checks
+async def handle_health(request):
+    return web.Response(text="Bot is healthy")
+
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
     
-    def log_message(self, format, *args):
-        pass  # Disable logging
-
-def run_health_server():
-    server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
     print(f"✅ Health check server running on port {PORT}")
-    server.serve_forever()
-
-# Start health server in background
-health_thread = threading.Thread(target=run_health_server, daemon=True)
-health_thread.start()
+    return runner, site
 
 # Database connection pool
 db_pool = None
 
-# ---------------- Database Functions (PostgreSQL) ----------------
+# ---------------- Database Functions ----------------
 async def init_db():
     """Initialize PostgreSQL database tables"""
     global db_pool
@@ -147,6 +139,10 @@ async def init_db():
         print(f"❌ Database initialization error: {e}")
         raise
 
+# [KEEP ALL YOUR ORIGINAL FUNCTIONS HERE - SAME AS BEFORE]
+# Don't change any of your bot logic functions
+# Only changed the health server and main() function
+
 async def save_profile(update, context):
     """Save user profile to PostgreSQL"""
     user = update.effective_user
@@ -172,7 +168,6 @@ async def save_profile(update, context):
             context.user_data.get('hobbies'),
             context.user_data.get('preference', 'Both')
         ))
-
 # ---------------- Channel Check ----------------
 async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Check if user is a member of the required channel"""
@@ -1888,19 +1883,23 @@ async def main():
     """Main function to run the bot"""
     print("🚀 Starting AU Dating Bot...")
     
+    # Start health server first
+    health_runner, health_site = await start_health_server()
+    
     # Initialize database
     try:
         await init_db()
         print("✅ Database initialized successfully!")
     except Exception as e:
         print(f"❌ Failed to initialize database: {e}")
+        await health_runner.cleanup()
         return
     
     # Create application
     print("🤖 Creating bot application...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 1. Conversation Handler
+    # Add the conversation handler (use the one defined above, not create a new one)
     app.add_handler(conv_handler)
 
     # 2. Command Handlers
@@ -1952,13 +1951,18 @@ async def main():
     print(f"👑 Admin User ID: {ADMIN_USER_ID if ADMIN_USER_ID else 'Not set'}")
     print(f"📢 Channel: {CHANNEL_USERNAME}")
     
-    # Start polling
-    await app.run_polling()
-
-if __name__ == "__main__":
+    # Start the bot
+    await app.initialize()
+    await app.start()
+    
     try:
-        asyncio.run(main())
+        # Keep running until interrupted
+        while True:
+            await asyncio.sleep(1)
     except KeyboardInterrupt:
-        print("\n👋 Bot stopped by user.")
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
+        print("\n👋 Shutting down...")
+    finally:
+        # Clean shutdown
+        await app.stop()
+        await app.shutdown()
+        await health_runner.cleanup()

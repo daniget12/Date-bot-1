@@ -632,7 +632,6 @@ async def edit_hobbies_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Registration cancelled. Use /start to begin again.")
     return ConversationHandler.END
-
 def get_main_menu():
     """Get main menu without matches button"""
     keyboard = [
@@ -640,6 +639,69 @@ def get_main_menu():
         ["⚙️ Settings", "📢 Report User"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+async def chat_relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Relay text messages between matched users"""
+    user_id = update.effective_user.id
+    
+    if not update.message or not update.message.text:
+        return
+    
+    # Check if user is in edit mode first
+    if 'editing_existing' in context.user_data:
+        # Handle text edit instead
+        await handle_text_edit(update, context)
+        return
+    
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT partner_id FROM active_chats WHERE user_id = $1", user_id)
+        
+        if row:
+            partner_id = row['partner_id']
+            name_row = await conn.fetchrow("SELECT name FROM users WHERE telegram_id = $1", user_id)
+            sender_name = name_row['name'] if name_row else "User"
+
+            try:
+                await context.bot.send_message(
+                    chat_id=partner_id, 
+                    text=f"💬 {sender_name}: {update.message.text}"
+                )
+            except Exception as e:
+                print(f"Error relaying message: {e}")
+                # Clean up if partner is unavailable
+                await conn.execute("DELETE FROM active_chats WHERE user_id = $1 OR partner_id = $1", user_id)
+                await conn.execute("DELETE FROM active_chats WHERE user_id = $1 OR partner_id = $1", partner_id)
+                await update.message.reply_text("❌ Your partner is no longer available. Chat ended.")
+
+async def photo_relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Relay photos between matched users in active chat"""
+    user_id = update.effective_user.id
+    
+    # Check if user is in edit mode first
+    if 'editing_existing' in context.user_data:
+        # Handle photo edit instead
+        await handle_photo_edit(update, context)
+        return
+    
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT partner_id FROM active_chats WHERE user_id = $1", user_id)
+            
+        if row:
+            partner_id = row['partner_id']
+            name_row = await conn.fetchrow("SELECT name FROM users WHERE telegram_id = $1", user_id)
+            sender_name = name_row['name'] if name_row else "User"
+            
+            try:
+                await context.bot.send_photo(
+                    chat_id=partner_id,
+                    photo=update.message.photo[-1].file_id,
+                    caption=f"📷 Photo from {sender_name}"
+                )
+            except Exception as e:
+                print(f"Error sending photo: {e}")
+                await conn.execute("DELETE FROM active_chats WHERE user_id = $1 OR partner_id = $1", user_id)
+                await conn.execute("DELETE FROM active_chats WHERE user_id = $1 OR partner_id = $1", partner_id)
+                await update.message.reply_text("❌ Your partner is no longer available. Chat ended.")
 
 # ---------------- Report System ----------------
 async def report_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1879,6 +1941,8 @@ conv_handler = ConversationHandler(
     per_message=False
 )
 
+# ... [all your existing code above] ...
+
 async def main():
     """Main function to run the bot"""
     print("🚀 Starting AU Dating Bot...")
@@ -1899,10 +1963,10 @@ async def main():
     print("🤖 Creating bot application...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Add the conversation handler (use the one defined above, not create a new one)
+    # Add the conversation handler
     app.add_handler(conv_handler)
 
-    # 2. Command Handlers
+    # Add command handlers
     app.add_handler(CommandHandler("find", find_match))
     app.add_handler(CommandHandler("myprofile", show_my_profile))
     app.add_handler(CommandHandler("settings", set_preference))
@@ -1911,14 +1975,14 @@ async def main():
     app.add_handler(CommandHandler("requests", view_requests))
     app.add_handler(CommandHandler("admin", admin_panel))
 
-    # 3. Callback Query Handlers
+    # Add callback query handlers
     app.add_handler(CallbackQueryHandler(handle_like, pattern="^(like_|report_)"))
     app.add_handler(CallbackQueryHandler(start_chat, pattern="^chat_"))
     app.add_handler(CallbackQueryHandler(find_match, pattern="find_next"))
     app.add_handler(CallbackQueryHandler(save_preference, pattern="^pref_"))
     app.add_handler(CallbackQueryHandler(start_edit_profile, pattern="^start_edit_profile$"))
     app.add_handler(CallbackQueryHandler(handle_edit_existing, pattern="^edit_(name|gender|campus|photo|bio|hobbies)_existing$"))
-    app.add_handler(CallbackQueryHandler(handle_save_edit, pattern="^(save_gender_|save_campus_|skip_photo|skip_bio|skip_hobbies)$"))
+    app.add_handler(CallbackQueryHandler(handle_save_edit, pattern="^(save_gender_|save_campus_|skip_)"))
     app.add_handler(CallbackQueryHandler(finish_edit, pattern="^finish_edit$"))
     app.add_handler(CallbackQueryHandler(check_channel_callback, pattern="^check_channel$"))
     
@@ -1930,21 +1994,17 @@ async def main():
     app.add_handler(CallbackQueryHandler(admin_handle_report, pattern="^(approve_|reject_)"))
     app.add_handler(CallbackQueryHandler(handle_request_action, pattern="^(accept_|decline_|clear_requests)"))
 
-    # 4. Main Menu Button Handlers
+    # Add menu button handlers
     app.add_handler(MessageHandler(filters.Regex("^🔥 Find Matches$"), find_match))
     app.add_handler(MessageHandler(filters.Regex("^👤 My Profile$"), show_my_profile))
     app.add_handler(MessageHandler(filters.Regex("^⚙️ Settings$"), set_preference))
     app.add_handler(MessageHandler(filters.Regex("^📢 Report User$"), report_user))
 
-    # 5. Edit Profile Text Handlers
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_edit))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo_edit))
-
-    # 6. Message Relays
+    # Add message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_relay))
     app.add_handler(MessageHandler(filters.PHOTO, photo_relay))
     
-    # 7. Admin broadcast handler
+    # Admin broadcast handler
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL, handle_broadcast_message))
 
     print("✅ AU Dating Bot is running on Railway! Press Ctrl+C to stop.")
@@ -1954,6 +2014,7 @@ async def main():
     # Start the bot
     await app.initialize()
     await app.start()
+    await app.updater.start_polling()
     
     try:
         # Keep running until interrupted
@@ -1963,6 +2024,11 @@ async def main():
         print("\n👋 Shutting down...")
     finally:
         # Clean shutdown
+        await app.updater.stop()
         await app.stop()
         await app.shutdown()
         await health_runner.cleanup()
+
+# ADD THIS AT THE END
+if __name__ == "__main__":
+    asyncio.run(main())

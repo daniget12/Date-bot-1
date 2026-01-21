@@ -46,112 +46,256 @@ print("=" * 50)
 db_pool = None
 
 # ---------------- Database Functions ----------------
+# ---------------- Database Functions ----------------
 async def init_db():
-    """Initialize PostgreSQL database tables"""
+    """Initialize PostgreSQL database tables with better error handling"""
     global db_pool
     
-    try:
-        db_pool = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=1,
-            max_size=10,
-            command_timeout=60
+    print("=" * 50)
+    print("🔄 Initializing database connection...")
+    
+    # Check if DATABASE_URL exists
+    if not DATABASE_URL:
+        print("❌ ERROR: DATABASE_URL environment variable is missing!")
+        print("Railway should provide this automatically.")
+        print("Check your Railway project -> Variables tab")
+        raise ValueError("DATABASE_URL is required")
+    
+    # Show partial URL for debugging (don't show full password)
+    if "postgresql://" in DATABASE_URL:
+        # Mask the password for security
+        parts = DATABASE_URL.split("@")
+        if len(parts) == 2:
+            safe_url = parts[0].split(":")[0] + ":***@" + parts[1]
+            print(f"📦 Connecting to: {safe_url}")
+        else:
+            print(f"📦 Database URL: {DATABASE_URL[:50]}...")
+    
+    max_retries = 3
+    retry_delay = 5  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"Attempt {attempt + 1}/{max_retries}...")
+            
+            # Create connection pool with proper timeouts
+            db_pool = await asyncpg.create_pool(
+                dsn=DATABASE_URL,  # Use the full URL directly
+                min_size=1,
+                max_size=10,
+                max_inactive_connection_lifetime=300,  # 5 minutes
+                command_timeout=60,
+                timeout=30,  # Connection timeout
+                statement_cache_size=0  # Disable statement cache for now
+            )
+            
+            # Test the connection
+            async with db_pool.acquire() as conn:
+                # Simple test query
+                db_version = await conn.fetchval("SELECT version()")
+                print(f"✅ Connected to PostgreSQL: {db_version.split(',')[0]}")
+                
+                # Test if we can execute queries
+                test_result = await conn.fetchval("SELECT 1 + 1")
+                print(f"✅ Database test query: 1 + 1 = {test_result}")
+            
+            # Create tables
+            print("📊 Creating/verifying database tables...")
+            await create_tables()
+            
+            print("✅ Database initialized successfully!")
+            print("=" * 50)
+            return
+            
+        except asyncpg.exceptions.ConnectionDoesNotExistError:
+            print(f"❌ Connection failed. Database might not be ready.")
+            if attempt < max_retries - 1:
+                print(f"⏳ Retrying in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
+            else:
+                print("❌ Max retries reached. Database connection failed.")
+                raise
+                
+        except asyncpg.exceptions.InvalidPasswordError:
+            print("❌ Invalid database password. Check your DATABASE_URL.")
+            raise
+            
+        except Exception as e:
+            print(f"❌ Database error: {type(e).__name__}: {e}")
+            if attempt < max_retries - 1:
+                print(f"⏳ Retrying in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
+            else:
+                print("❌ Max retries reached. Could not initialize database.")
+                raise
+
+async def create_tables():
+    """Create all required tables"""
+    async with db_pool.acquire() as conn:
+        # Users table - stores user profiles
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            telegram_id BIGINT UNIQUE NOT NULL,
+            username TEXT,
+            name TEXT NOT NULL,
+            gender TEXT NOT NULL,
+            campus TEXT NOT NULL,
+            photo_file_id TEXT,
+            bio TEXT,
+            hobbies TEXT,
+            preference TEXT DEFAULT 'Both',
+            is_banned BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            last_active TIMESTAMP DEFAULT NOW()
         )
+        """)
+        print("  ✅ users table")
         
-        async with db_pool.acquire() as conn:
-            # Users table
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                telegram_id BIGINT UNIQUE,
-                username TEXT,
-                name TEXT, 
-                gender TEXT, 
-                campus TEXT, 
-                photo_file_id TEXT, 
-                bio TEXT, 
-                hobbies TEXT, 
-                preference TEXT DEFAULT 'Both',
-                is_banned BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT NOW()
-            )""")
-            
-            # Swipes table
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS swipes (
-                liker_id BIGINT,
-                liked_id BIGINT,
-                UNIQUE(liker_id, liked_id)
-            )""")
-            
-            # Active chats table
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS active_chats (
-                user_id BIGINT PRIMARY KEY,
-                partner_id BIGINT
-            )""")
-            
-            # Chat requests table
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_requests (
-                id SERIAL PRIMARY KEY,
-                requester_id BIGINT,
-                requested_id BIGINT,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT NOW()
-            )""")
-            
-            # Reports table
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS reports (
-                id SERIAL PRIMARY KEY,
-                reporter_id BIGINT,
-                reported_id BIGINT,
-                reason TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT NOW()
-            )""")
-            
-            # Channel check table
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS channel_checks (
-                user_id BIGINT PRIMARY KEY,
-                has_joined BOOLEAN DEFAULT FALSE,
-                checked_at TIMESTAMP DEFAULT NOW()
-            )""")
-            
-            print("✅ Database tables created/verified successfully!")
-            
-    except Exception as e:
-        print(f"❌ Database initialization error: {e}")
-        raise
+        # Swipes table - stores likes/swipes
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS swipes (
+            id SERIAL PRIMARY KEY,
+            liker_id BIGINT NOT NULL,
+            liked_id BIGINT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(liker_id, liked_id)
+        )
+        """)
+        print("  ✅ swipes table")
+        
+        # Active chats table - stores currently active conversations
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS active_chats (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            partner_id BIGINT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(user_id),
+            UNIQUE(partner_id)
+        )
+        """)
+        print("  ✅ active_chats table")
+        
+        # Chat requests table - stores pending chat requests
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_requests (
+            id SERIAL PRIMARY KEY,
+            requester_id BIGINT NOT NULL,
+            requested_id BIGINT NOT NULL,
+            status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected')),
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(requester_id, requested_id, status) WHERE status = 'pending'
+        )
+        """)
+        print("  ✅ chat_requests table")
+        
+        # Reports table - stores user reports
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS reports (
+            id SERIAL PRIMARY KEY,
+            reporter_id BIGINT NOT NULL,
+            reported_id BIGINT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'resolved', 'dismissed')),
+            admin_notes TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+        """)
+        print("  ✅ reports table")
+        
+        # Channel check table - tracks who joined the channel
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_checks (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            has_joined BOOLEAN DEFAULT FALSE,
+            last_checked TIMESTAMP DEFAULT NOW(),
+            joined_at TIMESTAMP,
+            UNIQUE(user_id)
+        )
+        """)
+        print("  ✅ channel_checks table")
+        
+        print("✅ All tables created/verified successfully!")
 
 async def save_profile(update, context):
-    """Save user profile to PostgreSQL"""
+    """Save user profile to PostgreSQL with better error handling"""
     user = update.effective_user
     if not user:
-        return
+        return False
+    
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO users 
+                (telegram_id, username, name, gender, campus, photo_file_id, bio, hobbies, preference, updated_at) 
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                ON CONFLICT (telegram_id) DO UPDATE SET
+                username = EXCLUDED.username, 
+                name = EXCLUDED.name, 
+                gender = EXCLUDED.gender, 
+                campus = EXCLUDED.campus,
+                photo_file_id = EXCLUDED.photo_file_id, 
+                bio = EXCLUDED.bio, 
+                hobbies = EXCLUDED.hobbies, 
+                preference = EXCLUDED.preference,
+                updated_at = NOW()
+            """, (
+                user.id,
+                user.username,
+                context.user_data.get('name', ''),
+                context.user_data.get('gender', ''),
+                context.user_data.get('campus', ''),
+                context.user_data.get('photo_file_id'),
+                context.user_data.get('bio'),
+                context.user_data.get('hobbies'),
+                context.user_data.get('preference', 'Both')
+            ))
+            return True
+            
+    except Exception as e:
+        print(f"❌ Error saving profile for user {user.id}: {e}")
+        return False
 
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO users 
-            (telegram_id, username, name, gender, campus, photo_file_id, bio, hobbies, preference) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (telegram_id) DO UPDATE SET
-            username = $2, name = $3, gender = $4, campus = $5,
-            photo_file_id = $6, bio = $7, hobbies = $8, preference = $9
-        """, (
-            user.id,
-            user.username,
-            context.user_data.get('name'),
-            context.user_data.get('gender'),
-            context.user_data.get('campus'),
-            context.user_data.get('photo_file_id'),
-            context.user_data.get('bio'),
-            context.user_data.get('hobbies'),
-            context.user_data.get('preference', 'Both')
-        ))
+async def get_user_by_telegram_id(user_id: int):
+    """Get user by Telegram ID"""
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchrow(
+                "SELECT * FROM users WHERE telegram_id = $1", 
+                user_id
+            )
+    except Exception as e:
+        print(f"❌ Error getting user {user_id}: {e}")
+        return None
 
+async def is_user_banned(user_id: int) -> bool:
+    """Check if user is banned"""
+    try:
+        async with db_pool.acquire() as conn:
+            result = await conn.fetchval(
+                "SELECT is_banned FROM users WHERE telegram_id = $1", 
+                user_id
+            )
+            return result if result else False
+    except Exception as e:
+        print(f"❌ Error checking ban status for user {user_id}: {e}")
+        return False
+
+async def update_last_active(user_id: int):
+    """Update user's last active timestamp"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET last_active = NOW() WHERE telegram_id = $1", 
+                user_id
+            )
+    except:
+        pass  # Silently fail for this non-critical operation
 # ---------------- Channel Check ----------------
 async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Check if user is a member of the required channel"""

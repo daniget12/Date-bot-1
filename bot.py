@@ -9,20 +9,23 @@ from telegram.ext import (
     MessageHandler, ConversationHandler, filters, CallbackQueryHandler
 )
 from dotenv import load_dotenv
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 # Load environment variables
 load_dotenv()
 
-# Define conversation states
+# Define conversation states (ALL STATES INTACT)
 (NAME, GENDER, CAMPUS, PHOTO, BIO, HOBBIES, PREFERENCE, REVIEW, 
  EDIT_CHOICE, EDIT_NAME, EDIT_GENDER, EDIT_CAMPUS, 
  EDIT_PHOTO, EDIT_BIO, EDIT_HOBBIES, REPORT_REASON) = range(16)
 
 # Environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))  # Default to 0 if not set
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@AmboU_confession")
 DATABASE_URL = os.getenv("DATABASE_URL")
+PORT = int(os.getenv("PORT", "8080"))
 
 # Validate required environment variables
 if not BOT_TOKEN:
@@ -33,10 +36,37 @@ if not DATABASE_URL:
     print("❌ ERROR: DATABASE_URL environment variable is required!")
     sys.exit(1)
 
+print(f"✅ Starting bot with token: {BOT_TOKEN[:10]}...")
+print(f"✅ Database URL: {DATABASE_URL[:30]}...")
+
+# Simple health check server for Railway
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'Bot is healthy')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        pass  # Disable logging
+
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+    print(f"✅ Health check server running on port {PORT}")
+    server.serve_forever()
+
+# Start health server in background
+health_thread = threading.Thread(target=run_health_server, daemon=True)
+health_thread.start()
+
 # Database connection pool
 db_pool = None
 
-# ---------------- Database Functions ----------------
+# ---------------- Database Functions (PostgreSQL) ----------------
 async def init_db():
     """Initialize PostgreSQL database tables"""
     global db_pool
@@ -202,6 +232,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
     
+    # User has joined channel, continue with normal flow
     # Check if user is already in a chat
     async with db_pool.acquire() as conn:
         chat_row = await conn.fetchrow("SELECT partner_id FROM active_chats WHERE user_id = $1", user_id)
@@ -257,14 +288,18 @@ async def check_channel_callback(update: Update, context: ContextTypes.DEFAULT_T
             )
         else:
             # New user, start registration
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="<b>✅ CHANNEL VERIFIED! 🎉</b>\n\n"
-                     "Welcome to AU Dating Bot!\n\n"
-                     "Let's create your profile. First, what's your name or nickname?",
+            await query.edit_message_text(
+                "<b>✅ CHANNEL VERIFIED! 🎉</b>\n\n"
+                "Welcome to AU Dating Bot!\n\n"
+                "Let's create your profile. First, what's your name or nickname?",
                 parse_mode="HTML"
             )
-            return NAME
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="What's your name or nickname?",
+                parse_mode="HTML"
+            )
+            return ConversationHandler.END
     else:
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Join Channel", url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
@@ -604,7 +639,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def get_main_menu():
-    """Get main menu"""
+    """Get main menu without matches button"""
     keyboard = [
         ["🔥 Find Matches", "👤 My Profile"],
         ["⚙️ Settings", "📢 Report User"]
@@ -1851,10 +1886,9 @@ conv_handler = ConversationHandler(
 
 async def main():
     """Main function to run the bot"""
-    # Initialize database
     print("🚀 Starting AU Dating Bot...")
-    print(f"📊 Database URL: {DATABASE_URL[:30]}...")  # Show first 30 chars for security
     
+    # Initialize database
     try:
         await init_db()
         print("✅ Database initialized successfully!")

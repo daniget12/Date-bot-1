@@ -1,7 +1,7 @@
 import sys
 import os
 import asyncio
-import asyncpg  # CHANGED: Replaced aiosqlite with asyncpg
+import asyncpg
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -13,97 +13,109 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Define conversation states (ALL STATES INTACT)
+# Define conversation states
 (NAME, GENDER, CAMPUS, PHOTO, BIO, HOBBIES, PREFERENCE, REVIEW, 
  EDIT_CHOICE, EDIT_NAME, EDIT_GENDER, EDIT_CAMPUS, 
  EDIT_PHOTO, EDIT_BIO, EDIT_HOBBIES, REPORT_REASON) = range(16)
 
-# Environment variables (Railway provides DATABASE_URL)
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8598994507:AAEnbvlFGyS2gZs4mkLzbCeYk6NtbyN8ZVM")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "7719239133"))
+# Environment variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))  # Default to 0 if not set
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@AmboU_confession")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway provides this automatically
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Validate required environment variables
+if not BOT_TOKEN:
+    print("❌ ERROR: BOT_TOKEN environment variable is required!")
+    sys.exit(1)
+
+if not DATABASE_URL:
+    print("❌ ERROR: DATABASE_URL environment variable is required!")
+    sys.exit(1)
 
 # Database connection pool
 db_pool = None
 
-# ---------------- Database Functions (CONVERTED to PostgreSQL) ----------------
+# ---------------- Database Functions ----------------
 async def init_db():
     """Initialize PostgreSQL database tables"""
     global db_pool
     
-    if db_pool is None:
-        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    
-    async with db_pool.acquire() as conn:
-        # Users table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            telegram_id BIGINT UNIQUE,
-            username TEXT,
-            name TEXT, 
-            gender TEXT, 
-            campus TEXT, 
-            photo_file_id TEXT, 
-            bio TEXT, 
-            hobbies TEXT, 
-            preference TEXT DEFAULT 'Both',
-            is_banned BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT NOW()
-        )""")
+    try:
+        db_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=10,
+            command_timeout=60
+        )
         
-        # Swipes table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS swipes (
-            liker_id BIGINT,
-            liked_id BIGINT,
-            UNIQUE(liker_id, liked_id)
-        )""")
-        
-        # Active chats table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS active_chats (
-            user_id BIGINT PRIMARY KEY,
-            partner_id BIGINT
-        )""")
-        
-        # Chat requests table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_requests (
-            id SERIAL PRIMARY KEY,
-            requester_id BIGINT,
-            requested_id BIGINT,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT NOW()
-        )""")
-        
-        # Reports table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS reports (
-            id SERIAL PRIMARY KEY,
-            reporter_id BIGINT,
-            reported_id BIGINT,
-            reason TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT NOW()
-        )""")
-        
-        # Channel check table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS channel_checks (
-            user_id BIGINT PRIMARY KEY,
-            has_joined BOOLEAN DEFAULT FALSE,
-            checked_at TIMESTAMP DEFAULT NOW()
-        )""")
-        
-        # Create indexes for performance
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_telegram ON users(telegram_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_swipes_liker ON swipes(liker_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_swipes_liked ON swipes(liked_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_active_chats_partner ON active_chats(partner_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_requests_status ON chat_requests(requested_id, status)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)")
+        async with db_pool.acquire() as conn:
+            # Users table
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE,
+                username TEXT,
+                name TEXT, 
+                gender TEXT, 
+                campus TEXT, 
+                photo_file_id TEXT, 
+                bio TEXT, 
+                hobbies TEXT, 
+                preference TEXT DEFAULT 'Both',
+                is_banned BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )""")
+            
+            # Swipes table
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS swipes (
+                liker_id BIGINT,
+                liked_id BIGINT,
+                UNIQUE(liker_id, liked_id)
+            )""")
+            
+            # Active chats table
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS active_chats (
+                user_id BIGINT PRIMARY KEY,
+                partner_id BIGINT
+            )""")
+            
+            # Chat requests table
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_requests (
+                id SERIAL PRIMARY KEY,
+                requester_id BIGINT,
+                requested_id BIGINT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT NOW()
+            )""")
+            
+            # Reports table
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id SERIAL PRIMARY KEY,
+                reporter_id BIGINT,
+                reported_id BIGINT,
+                reason TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT NOW()
+            )""")
+            
+            # Channel check table
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_checks (
+                user_id BIGINT PRIMARY KEY,
+                has_joined BOOLEAN DEFAULT FALSE,
+                checked_at TIMESTAMP DEFAULT NOW()
+            )""")
+            
+            print("✅ Database tables created/verified successfully!")
+            
+    except Exception as e:
+        print(f"❌ Database initialization error: {e}")
+        raise
 
 async def save_profile(update, context):
     """Save user profile to PostgreSQL"""
@@ -131,14 +143,14 @@ async def save_profile(update, context):
             context.user_data.get('preference', 'Both')
         ))
 
-# ---------------- Channel Check (UNCHANGED) ----------------
+# ---------------- Channel Check ----------------
 async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Check if user is a member of the required channel"""
     try:
         chat_member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
         return chat_member.status in ['member', 'administrator', 'creator']
     except Exception as e:
-        print(f"Error checking channel membership: {e}")
+        print(f"Warning checking channel membership: {e}")
         return False
 
 async def update_channel_check(user_id: int, has_joined: bool):
@@ -151,7 +163,7 @@ async def update_channel_check(user_id: int, has_joined: bool):
             has_joined = $2, checked_at = NOW()
         """, (user_id, has_joined))
 
-# ---------------- Start (CONVERTED) ----------------
+# ---------------- Start ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -190,7 +202,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
     
-    # User has joined channel, continue with normal flow
     # Check if user is already in a chat
     async with db_pool.acquire() as conn:
         chat_row = await conn.fetchrow("SELECT partner_id FROM active_chats WHERE user_id = $1", user_id)
@@ -218,7 +229,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return NAME
 
 async def check_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle channel join check callback (CONVERTED)"""
+    """Handle channel join check callback"""
     query = update.callback_query
     await query.answer()
     
@@ -246,18 +257,14 @@ async def check_channel_callback(update: Update, context: ContextTypes.DEFAULT_T
             )
         else:
             # New user, start registration
-            await query.edit_message_text(
-                "<b>✅ CHANNEL VERIFIED! 🎉</b>\n\n"
-                "Welcome to AU Dating Bot!\n\n"
-                "Let's create your profile. First, what's your name or nickname?",
-                parse_mode="HTML"
-            )
             await context.bot.send_message(
                 chat_id=user_id,
-                text="What's your name or nickname?",
+                text="<b>✅ CHANNEL VERIFIED! 🎉</b>\n\n"
+                     "Welcome to AU Dating Bot!\n\n"
+                     "Let's create your profile. First, what's your name or nickname?",
                 parse_mode="HTML"
             )
-            return ConversationHandler.END
+            return NAME
     else:
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Join Channel", url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
@@ -276,7 +283,7 @@ async def check_channel_callback(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=keyboard
         )
 
-# ---------------- Input Handlers (UNCHANGED - No database calls) ----------------
+# ---------------- Input Handlers ----------------
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.text:
         await update.message.reply_text("❌ Please enter your name or nickname in text format.")
@@ -355,7 +362,6 @@ async def get_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Set your hobbies 🏀🎨 (or press Skip)", reply_markup=InlineKeyboardMarkup(keyboard))
     return HOBBIES
 
-# ---------------- Registration End & Preference (UNCHANGED) ----------------
 async def get_hobbies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query and update.callback_query.data == "skip":
         context.user_data['hobbies'] = None
@@ -381,7 +387,6 @@ async def get_preference(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['preference'] = query.data.replace("pref_", "")
     return await show_profile(update, context)
 
-# ---------------- Show Profile (UNCHANGED) ----------------
 async def show_profile(update, context):
     name = context.user_data.get('name')
     gender = context.user_data.get('gender')
@@ -445,7 +450,6 @@ async def show_profile(update, context):
             )
     return REVIEW
 
-# ---------------- Review / Edit (CONVERTED) ----------------
 async def review_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -492,7 +496,6 @@ async def review_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         return EDIT_CHOICE
 
-# ---------------- Edit Choice (UNCHANGED) ----------------
 async def edit_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -534,7 +537,6 @@ async def edit_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     return state_map.get(choice)
 
-# ---------------- Edit Inputs (UNCHANGED) ----------------
 async def edit_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.text:
         await update.message.reply_text("❌ Please send a valid name.")
@@ -597,21 +599,19 @@ async def edit_hobbies_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("❌ Please send text or press Skip.")
     return EDIT_HOBBIES
 
-# ---------------- Cancel (UNCHANGED) ----------------
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Registration cancelled. Use /start to begin again.")
     return ConversationHandler.END
 
-# ---------------- Main Menu (UNCHANGED) ----------------
 def get_main_menu():
-    """Get main menu without matches button"""
+    """Get main menu"""
     keyboard = [
         ["🔥 Find Matches", "👤 My Profile"],
         ["⚙️ Settings", "📢 Report User"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ---------------- Report System (CONVERTED) ----------------
+# ---------------- Report System ----------------
 async def report_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start report process"""
     user_id = update.effective_user.id
@@ -661,22 +661,23 @@ async def report_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id, reported_id, reason
         )
     
-    # Notify admin
-    admin_message = (
-        f"<b>🚨 NEW USER REPORT</b>\n\n"
-        f"<b>👤 Reporter:</b> {user_id}\n"
-        f"<b>⚠️ Reported User:</b> {reported_id}\n"
-        f"<b>📝 Reason:</b> {reason}\n\n"
-        f"Use /admin to review this report."
-    )
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_USER_ID, 
-            text=admin_message, 
-            parse_mode="HTML"
+    # Notify admin if admin ID is set
+    if ADMIN_USER_ID:
+        admin_message = (
+            f"<b>🚨 NEW USER REPORT</b>\n\n"
+            f"<b>👤 Reporter:</b> {user_id}\n"
+            f"<b>⚠️ Reported User:</b> {reported_id}\n"
+            f"<b>📝 Reason:</b> {reason}\n\n"
+            f"Use /admin to review this report."
         )
-    except:
-        pass
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_USER_ID, 
+                text=admin_message, 
+                parse_mode="HTML"
+            )
+        except:
+            pass
     
     await update.message.reply_text(
         "✅ Thank you for your report. We will review it and take appropriate action.\n\n"
@@ -684,7 +685,7 @@ async def report_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# ---------------- Profile Management (CONVERTED) ----------------
+# ---------------- Profile Management ----------------
 async def set_preference(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if user is in a chat
     user_id = update.effective_user.id
@@ -954,7 +955,7 @@ async def show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
-# ---------------- Edit Profile System (CONVERTED) ----------------
+# ---------------- Edit Profile System ----------------
 async def start_edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start editing profile from existing profile view"""
     query = update.callback_query
@@ -1290,10 +1291,7 @@ async def finish_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
-# [IMPORTANT: Due to character limit, I'm showing the PATTERN for remaining functions]
-# All other functions need similar conversion. Here's the conversion pattern:
-
-# ---------------- Admin Panel (CONVERTED PATTERN) ----------------
+# ---------------- Admin Panel ----------------
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin panel"""
     user_id = update.effective_user.id
@@ -1304,11 +1302,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 View All Users", callback_data="admin_users")],
-        [InlineKeyboardButton("🚫 Banned Users", callback_data="admin_banned")],
         [InlineKeyboardButton("🚨 Reports", callback_data="admin_reports")],
         [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("🔍 Search User", callback_data="admin_search")]
+        [InlineKeyboardButton("🔙 Back to Main", callback_data="admin_back")]
     ]
     
     await update.message.reply_text(
@@ -1363,10 +1359,199 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]
     await query.edit_message_text(stats_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# [Due to character limit, I'll show the remaining functions follow the SAME pattern]
-# All database calls need to be converted from aiosqlite to asyncpg format
+async def admin_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show pending reports"""
+    query = update.callback_query
+    await query.answer()
+    
+    async with db_pool.acquire() as conn:
+        reports = await conn.fetch("""
+            SELECT r.id, r.reporter_id, r.reported_id, r.reason, r.created_at,
+                   u1.name as reporter_name, u2.name as reported_name
+            FROM reports r
+            LEFT JOIN users u1 ON r.reporter_id = u1.telegram_id
+            LEFT JOIN users u2 ON r.reported_id = u2.telegram_id
+            WHERE r.status = 'pending'
+            ORDER BY r.created_at DESC
+            LIMIT 10
+        """)
+    
+    if not reports:
+        await query.edit_message_text(
+            "✅ No pending reports.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]])
+        )
+        return
+    
+    text = "<b>🚨 PENDING REPORTS</b>\n\n"
+    keyboard = []
+    
+    for report in reports:
+        report_id = report['id']
+        text += f"<b>Report ID:</b> {report_id}\n"
+        text += f"<b>Reporter:</b> {report['reporter_name']} ({report['reporter_id']})\n"
+        text += f"<b>Reported:</b> {report['reported_name']} ({report['reported_id']})\n"
+        text += f"<b>Reason:</b> {report['reason'][:100]}...\n"
+        text += f"<b>Date:</b> {report['created_at'].strftime('%Y-%m-%d %H:%M')}\n"
+        text += "-" * 30 + "\n"
+        
+        keyboard.append([
+            InlineKeyboardButton(f"✅ Approve {report_id}", callback_data=f"approve_{report_id}"),
+            InlineKeyboardButton(f"❌ Reject {report_id}", callback_data=f"reject_{report_id}")
+        ])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back")])
+    
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-# ---------------- Chat System (CONVERTED PATTERN) ----------------
+async def admin_handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle report approval/rejection"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data.startswith("approve_"):
+        report_id = int(query.data.split('_')[1])
+        action = "approved"
+        status = "approved"
+    elif query.data.startswith("reject_"):
+        report_id = int(query.data.split('_')[1])
+        action = "rejected"
+        status = "rejected"
+    else:
+        return
+    
+    async with db_pool.acquire() as conn:
+        # Get report details
+        report = await conn.fetchrow("""
+            SELECT reporter_id, reported_id, reason FROM reports WHERE id = $1
+        """, report_id)
+        
+        if report:
+            # Update report status
+            await conn.execute("UPDATE reports SET status = $1 WHERE id = $2", status, report_id)
+            
+            # If approved, ban the reported user
+            if status == "approved":
+                await conn.execute("UPDATE users SET is_banned = TRUE WHERE telegram_id = $1", report['reported_id'])
+                
+                # Notify the reported user
+                try:
+                    await context.bot.send_message(
+                        chat_id=report['reported_id'],
+                        text="❌ Your account has been banned due to user reports. Contact admin for appeal."
+                    )
+                except:
+                    pass
+    
+    await query.edit_message_text(
+        f"✅ Report {report_id} {action}!",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_reports")]])
+    )
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start broadcast process"""
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data['broadcasting'] = True
+    
+    await query.edit_message_text(
+        "<b>📢 BROADCAST MESSAGE</b>\n\n"
+        "Send the message you want to broadcast to all users.\n"
+        "You can send text, photo, or document.\n\n"
+        "Type /cancel to cancel.",
+        parse_mode="HTML"
+    )
+
+async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle broadcast message"""
+    if 'broadcasting' not in context.user_data:
+        return
+    
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_USER_ID:
+        return
+    
+    # Cancel broadcast
+    if update.message.text and update.message.text.startswith('/cancel'):
+        context.user_data.pop('broadcasting', None)
+        await update.message.reply_text("Broadcast cancelled.")
+        return
+    
+    # Get all users
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT telegram_id FROM users WHERE is_banned = FALSE")
+    
+    total = len(users)
+    success = 0
+    failed = 0
+    
+    await update.message.reply_text(f"📤 Broadcasting to {total} users...")
+    
+    # Send to each user
+    for user in users:
+        try:
+            if update.message.text:
+                await context.bot.send_message(
+                    chat_id=user['telegram_id'],
+                    text=f"<b>📢 ADMIN ANNOUNCEMENT</b>\n\n{update.message.text}",
+                    parse_mode="HTML"
+                )
+            elif update.message.photo:
+                await context.bot.send_photo(
+                    chat_id=user['telegram_id'],
+                    photo=update.message.photo[-1].file_id,
+                    caption=f"<b>📢 ADMIN ANNOUNCEMENT</b>\n\n{update.message.caption or ''}",
+                    parse_mode="HTML"
+                )
+            elif update.message.document:
+                await context.bot.send_document(
+                    chat_id=user['telegram_id'],
+                    document=update.message.document.file_id,
+                    caption=f"<b>📢 ADMIN ANNOUNCEMENT</b>\n\n{update.message.caption or ''}",
+                    parse_mode="HTML"
+                )
+            success += 1
+        except Exception as e:
+            failed += 1
+            print(f"Failed to send to {user['telegram_id']}: {e}")
+        
+        # Small delay to avoid rate limiting
+        await asyncio.sleep(0.1)
+    
+    context.user_data.pop('broadcasting', None)
+    
+    await update.message.reply_text(
+        f"✅ Broadcast completed!\n\n"
+        f"✅ Successful: {success}\n"
+        f"❌ Failed: {failed}"
+    )
+
+async def admin_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Return to admin panel"""
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")],
+        [InlineKeyboardButton("🚨 Reports", callback_data="admin_reports")],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("🔙 Back to Main", callback_data="admin_back")]
+    ]
+    
+    await query.edit_message_text(
+        "<b>🔧 ADMIN PANEL</b>\n\n"
+        "Select an option below:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ---------------- Chat System ----------------
 async def start_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1454,7 +1639,6 @@ async def start_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-# ---------------- Chat Relay Functions (CONVERTED) ----------------
 async def chat_relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not update.message or not update.message.text:
@@ -1502,7 +1686,6 @@ async def photo_relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await conn.execute("DELETE FROM active_chats WHERE user_id = $1 OR partner_id = $1", partner_id)
                 await update.message.reply_text("❌ Your partner is no longer available. Chat ended.")
 
-# ---------------- STOP FUNCTION (CONVERTED) ----------------
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     partner_id = None
@@ -1534,6 +1717,113 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("📴 Chat ended. The other user will need your permission to reconnect.")
 
+async def view_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View pending chat requests"""
+    user_id = update.effective_user.id
+    
+    async with db_pool.acquire() as conn:
+        requests = await conn.fetch("""
+            SELECT cr.id, cr.requester_id, u.name, u.campus
+            FROM chat_requests cr
+            JOIN users u ON cr.requester_id = u.telegram_id
+            WHERE cr.requested_id = $1 AND cr.status = 'pending'
+            ORDER BY cr.created_at DESC
+        """, user_id)
+    
+    if not requests:
+        await update.message.reply_text("You have no pending chat requests.")
+        return
+    
+    keyboard = []
+    for req in requests:
+        req_id = req['id']
+        requester_id = req['requester_id']
+        name = req['name']
+        keyboard.append([
+            InlineKeyboardButton(f"✅ Accept {name}", callback_data=f"accept_{req_id}"),
+            InlineKeyboardButton(f"❌ Decline {name}", callback_data=f"decline_{req_id}")
+        ])
+    
+    keyboard.append([InlineKeyboardButton("🗑️ Clear All", callback_data="clear_requests")])
+    
+    await update.message.reply_text(
+        "<b>📨 PENDING CHAT REQUESTS</b>\n\n"
+        "You have pending requests to chat. Accept or decline below:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_request_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle chat request actions"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data.startswith("accept_"):
+        request_id = int(query.data.split('_')[1])
+        
+        async with db_pool.acquire() as conn:
+            # Get request details
+            request = await conn.fetchrow("""
+                SELECT requester_id, requested_id FROM chat_requests WHERE id = $1
+            """, request_id)
+            
+            if request:
+                requester_id = request['requester_id']
+                requested_id = request['requested_id']
+                
+                # Clear old chats
+                await conn.execute("DELETE FROM active_chats WHERE user_id = $1 OR partner_id = $1", requester_id)
+                await conn.execute("DELETE FROM active_chats WHERE user_id = $1 OR partner_id = $1", requested_id)
+                
+                # Create new chat
+                await conn.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2)", requester_id, requested_id)
+                await conn.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2)", requested_id, requester_id)
+                
+                # Delete the request
+                await conn.execute("DELETE FROM chat_requests WHERE id = $1", request_id)
+                
+                # Get names
+                requester_name = await conn.fetchval("SELECT name FROM users WHERE telegram_id = $1", requester_id)
+                requested_name = await conn.fetchval("SELECT name FROM users WHERE telegram_id = $1", requested_id)
+                
+                # Notify both users
+                try:
+                    await context.bot.send_message(
+                        chat_id=requester_id,
+                        text=f"<b>✅ CHAT REQUEST ACCEPTED!</b>\n\n"
+                             f"You are now connected with {requested_name}! Say hello! 👋",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+                
+                await query.edit_message_text(
+                    f"✅ Chat request accepted! You are now connected with {requester_name}.",
+                    reply_markup=None
+                )
+    
+    elif query.data.startswith("decline_"):
+        request_id = int(query.data.split('_')[1])
+        
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM chat_requests WHERE id = $1", request_id)
+        
+        await query.edit_message_text(
+            "❌ Chat request declined.",
+            reply_markup=None
+        )
+    
+    elif query.data == "clear_requests":
+        user_id = query.from_user.id
+        
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM chat_requests WHERE requested_id = $1", user_id)
+        
+        await query.edit_message_text(
+            "🗑️ All pending requests cleared.",
+            reply_markup=None
+        )
+
 # ---------------- Main Application Setup ----------------
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler('start', start)],
@@ -1562,9 +1852,18 @@ conv_handler = ConversationHandler(
 async def main():
     """Main function to run the bot"""
     # Initialize database
-    await init_db()
+    print("🚀 Starting AU Dating Bot...")
+    print(f"📊 Database URL: {DATABASE_URL[:30]}...")  # Show first 30 chars for security
+    
+    try:
+        await init_db()
+        print("✅ Database initialized successfully!")
+    except Exception as e:
+        print(f"❌ Failed to initialize database: {e}")
+        return
     
     # Create application
+    print("🤖 Creating bot application...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # 1. Conversation Handler
@@ -1588,14 +1887,15 @@ async def main():
     app.add_handler(CallbackQueryHandler(handle_edit_existing, pattern="^edit_(name|gender|campus|photo|bio|hobbies)_existing$"))
     app.add_handler(CallbackQueryHandler(handle_save_edit, pattern="^(save_gender_|save_campus_|skip_photo|skip_bio|skip_hobbies)$"))
     app.add_handler(CallbackQueryHandler(finish_edit, pattern="^finish_edit$"))
+    app.add_handler(CallbackQueryHandler(check_channel_callback, pattern="^check_channel$"))
+    
+    # Admin callbacks
     app.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
-    app.add_handler(CallbackQueryHandler(admin_users, pattern="^admin_users$"))
     app.add_handler(CallbackQueryHandler(admin_reports, pattern="^admin_reports$"))
     app.add_handler(CallbackQueryHandler(admin_broadcast, pattern="^admin_broadcast$"))
     app.add_handler(CallbackQueryHandler(admin_back, pattern="^admin_back$"))
-    app.add_handler(CallbackQueryHandler(admin_handle_report, pattern="^(approve_|reject_|ban_|unban_|view_)"))
+    app.add_handler(CallbackQueryHandler(admin_handle_report, pattern="^(approve_|reject_)"))
     app.add_handler(CallbackQueryHandler(handle_request_action, pattern="^(accept_|decline_|clear_requests)"))
-    app.add_handler(CallbackQueryHandler(check_channel_callback, pattern="^check_channel$"))
 
     # 4. Main Menu Button Handlers
     app.add_handler(MessageHandler(filters.Regex("^🔥 Find Matches$"), find_match))
@@ -1615,20 +1915,16 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL, handle_broadcast_message))
 
     print("✅ AU Dating Bot is running on Railway! Press Ctrl+C to stop.")
+    print(f"👑 Admin User ID: {ADMIN_USER_ID if ADMIN_USER_ID else 'Not set'}")
+    print(f"📢 Channel: {CHANNEL_USERNAME}")
     
     # Start polling
     await app.run_polling()
 
 if __name__ == "__main__":
-    # Check for required environment variables
-    if not BOT_TOKEN:
-        print("❌ ERROR: BOT_TOKEN environment variable is required!")
-        sys.exit(1)
-    
-    if not DATABASE_URL:
-        print("❌ ERROR: DATABASE_URL environment variable is required!")
-        print("💡 Railway automatically provides DATABASE_URL for PostgreSQL")
-        sys.exit(1)
-    
-    # Run the bot
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped by user.")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
